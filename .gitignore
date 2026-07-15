@@ -5,6 +5,7 @@
 # Visual Studio
 /.vs
 *.suo
+*.vcxproj.user
 *.ncb
 *.idb
 *.pdb
@@ -19,6 +20,7 @@
 *.lib
 *.exe
 *.htm
+/Backup*/
 
 # ctags
 tags
