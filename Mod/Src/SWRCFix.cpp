@@ -2,6 +2,7 @@
 #include "Editor.h"
 #include "Window.h"
 #include "IpDrv.h"
+#include "XInterface.h"
 #include "CodeInjection.h"
 
 USWRCFix* USWRCFix::Instance = NULL;
@@ -228,6 +229,103 @@ static UBOOL __fastcall UnrealEdEngineExecOverride(UEngine* Self, DWORD Edx, con
 }
 
 /*
+ * Show the Extras option in localized versions of the main menu.
+ *
+ * CTMenuMain.Init hides MenuOptions[6] for every language except INT and moves
+ * the Quit option into its place. Hooking the script function at runtime keeps
+ * this fix in Mod.dll and avoids rebuilding XInterfaceCTMenus.u or Mod.u.
+ */
+static UFunction* CTMenuMainInitFunction = NULL;
+static UProperty* CTMenuMainMenuOptionsProperty = NULL;
+static UProperty* CTMenuMainBorderProperty = NULL;
+static DWORD      CTMenuMainInitFunctionFlags = 0;
+static Native     CTMenuMainInitNative = NULL;
+
+static void RestoreLocalizedMainMenuExtras(UObject* Menu)
+{
+	if(appStricmp(UObject::GetLanguage(), "int") == 0)
+		return;
+
+	FMenuButtonText* Extras = reinterpret_cast<FMenuButtonText*>(CTMenuMainMenuOptionsProperty->DataAddr(Menu, 6));
+	FMenuButtonText* Quit   = reinterpret_cast<FMenuButtonText*>(CTMenuMainMenuOptionsProperty->DataAddr(Menu, 7));
+	FMenuSprite* Border     = reinterpret_cast<FMenuSprite*>(CTMenuMainBorderProperty->DataAddr(Menu, 0));
+
+	if(!Extras->bHidden)
+		return;
+
+	Extras->bHidden = 0;
+
+	// CTMenuMain.Init copies the Extras Y positions to Quit. Move Quit back to the next row.
+	const FLOAT OptionSpacingY = 0.05666f;
+	Quit->Blurred.PosY += OptionSpacingY;
+	Quit->Focused.PosY += OptionSpacingY;
+	Quit->BackgroundBlurred.PosY += OptionSpacingY;
+	Quit->BackgroundFocused.PosY += OptionSpacingY;
+
+	// Reverse the border shrink performed when Extras is hidden.
+	Border->PosY += 0.02833f;
+	Border->ScaleY += OptionSpacingY;
+}
+
+static void __fastcall CTMenuMainInitOverride(UObject* Self, int, FFrame& Stack, void* Result)
+{
+	const bool IsEvent = CTMenuMainInitFunction == Stack.Node;
+
+	CTMenuMainInitFunction->FunctionFlags = CTMenuMainInitFunctionFlags;
+	CTMenuMainInitFunction->Func = CTMenuMainInitNative;
+
+	if(IsEvent)
+		(Self->*CTMenuMainInitNative)(Stack, Result);
+	else
+		Self->CallFunction(Stack, Result, CTMenuMainInitFunction);
+
+	RestoreLocalizedMainMenuExtras(Self);
+
+	void* Hook = CTMenuMainInitOverride;
+	appMemcpy(&CTMenuMainInitFunction->Func, &Hook, sizeof(Hook));
+	CTMenuMainInitFunction->FunctionFlags = CTMenuMainInitFunctionFlags | FUNC_Native;
+}
+
+static void InstallCTMenuMainInitHook()
+{
+	UClass* MenuClass = LoadClass<UObject>(NULL, "XInterfaceCTMenus.CTMenuMain", NULL, 0, NULL);
+
+	if(!MenuClass)
+	{
+		debugf(NAME_Warning, "Failed to load CTMenuMain; localized Extras option will remain hidden");
+		return;
+	}
+
+	CTMenuMainInitFunction = MenuClass->GetDefaultObject()->FindFunction(FName("Init"));
+	CTMenuMainMenuOptionsProperty = FindField<UProperty>(MenuClass, "MenuOptions");
+	CTMenuMainBorderProperty = FindField<UProperty>(MenuClass, "Border");
+
+	if(!CTMenuMainInitFunction || CTMenuMainInitFunction->GetOuter() != MenuClass ||
+	   CTMenuMainInitFunction->iNative != 0 || !CTMenuMainMenuOptionsProperty ||
+	   CTMenuMainMenuOptionsProperty->GetOuter() != MenuClass ||
+	   CTMenuMainMenuOptionsProperty->ArrayDim < 8 ||
+	   CTMenuMainMenuOptionsProperty->GetElementSize() != sizeof(FMenuButtonText) ||
+	   !CTMenuMainBorderProperty || CTMenuMainBorderProperty->GetOuter() != MenuClass ||
+	   CTMenuMainBorderProperty->GetElementSize() != sizeof(FMenuSprite))
+	{
+		debugf(NAME_Warning, "Unexpected CTMenuMain layout; localized Extras option will remain hidden");
+		CTMenuMainInitFunction = NULL;
+		CTMenuMainMenuOptionsProperty = NULL;
+		CTMenuMainBorderProperty = NULL;
+		return;
+	}
+
+	CTMenuMainInitFunctionFlags = CTMenuMainInitFunction->FunctionFlags;
+	CTMenuMainInitNative = CTMenuMainInitFunction->Func;
+
+	void* Hook = CTMenuMainInitOverride;
+	appMemcpy(&CTMenuMainInitFunction->Func, &Hook, sizeof(Hook));
+	CTMenuMainInitFunction->FunctionFlags |= FUNC_Native;
+
+	debugf("Enabled Extras option for localized main menus");
+}
+
+/*
  * Fix initialization
  */
 
@@ -409,13 +507,20 @@ void USWRCFix::Init()
 		 * The GameSpy master server is not available anymore so an option is added to provide an alternate master server address in the config.
 		 */
 		SetDefaultMasterServerAddress();
+
+		/*
+		 * Fix 7:
+		 * The Extras option is hidden from the main menu whenever the language is not INT, even though localized labels are available and the videos work.
+		 * Hook CTMenuMain.Init and restore the option after the original script has adjusted the layout.
+		 */
+		InstallCTMenuMainInitHook();
 	}
 	else // Editor specific fixes
 	{
 		debugf("Applying editor fixes");
 
 		/*
-		 * Fix 7:
+		 * Fix 8:
 		 * The editor loads all textures at startup which can consume a significant amount of memory.
 		 * It does so because initially there is no package selected for the texture browser and thus all textures are shown.
 		 * This is fixed by overriding the Exec function and checking for the command that intiializes the texture browser and providing a single package to be initially loaded.
