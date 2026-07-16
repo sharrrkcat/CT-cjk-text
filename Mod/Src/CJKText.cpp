@@ -51,6 +51,18 @@ struct FRawFont{ // UFont
 static inline bool IsDBCSLead(BYTE B) { return B >= 0x81 && B <= 0xFE; }
 static inline bool IsDBCSTrail(BYTE B){ return B >= 0x40 && B <= 0xFE && B != 0x7F; }
 
+// Returns the number of bytes in a forced line break at S. Localization files
+// preserve backslash + 'n' as two literal bytes, so handle it in addition to LF/CRLF.
+static INT LineBreakBytes(const BYTE* S){
+	if(S[0] == '\r')
+		return S[1] == '\n' ? 2 : 1;
+
+	if(S[0] == '\n')
+		return 1;
+
+	return S[0] == '\\' && S[1] == 'n' ? 2 : 0;
+}
+
 // GBK punctuation that must not appear at the start of a line.
 static bool IsNoBreakBeforePunct(WORD Key){
 	switch(Key){
@@ -96,6 +108,20 @@ static INT RemapKey(const FRawFont* F, WORD Key){
 	}
 
 	return 32; // space
+}
+
+static INT DefaultLineHeight(const FRawFont* F, const UCanvas* C, FLOAT ScaleY){
+	const WORD SampleKeys[] = {'A', 'M', '0'};
+	INT H = 0;
+
+	for(INT i = 0; i < ARRAY_COUNT(SampleKeys); ++i){
+		INT Glyph = RemapKey(F, SampleKeys[i]);
+
+		if(Glyph >= 0 && Glyph < F->NumChars() && F->Chars[Glyph].VSize > H)
+			H = F->Chars[Glyph].VSize;
+	}
+
+	return appFloor((H + appFloor(C->SpaceY)) * ScaleY);
 }
 
 // Reimplementation of the per-line glyph emitter (@103E8990, ampersand path
@@ -159,8 +185,9 @@ static INT DrawGlyphRun(UCanvas* C, const FRawFont* F, FLOAT ScaleX, FLOAT Scale
 /*
  * Replacement for UCanvas::WrappedPrint(INT Style, INT& XL, INT& YL, UFont*,
  * FLOAT ScaleX, FLOAT ScaleY, UBOOL Center, const TCHAR* Text).
- * Behavior mirrors the original except characters are fetched DBCS-aware and
- * line breaks are additionally allowed at DBCS character boundaries.
+ * Behavior mirrors the original except characters are fetched DBCS-aware,
+ * line breaks are additionally allowed at DBCS character boundaries, and the
+ * literal backslash + 'n' sequence used by localization files is a forced line break.
  */
 static void __fastcall WrappedPrintOverride(UCanvas* C, DWORD, INT Style, INT* XL, INT* YL,
                                             UFont* InFont, FLOAT ScaleX, FLOAT ScaleY,
@@ -180,6 +207,25 @@ static void __fastcall WrappedPrintOverride(UCanvas* C, DWORD, INT Style, INT* X
 	*YL = 0;
 
 	for(;;){
+		INT LeadingBreakBytes = LineBreakBytes(S);
+
+		if(LeadingBreakBytes){
+			INT LineH = DefaultLineHeight(F, C, ScaleY);
+
+			C->CurX = EntryCurX;
+			C->CurY += LineH;
+			*YL += LineH;
+			S += LeadingBreakBytes;
+
+			while(*S == 32)
+				++S;
+
+			if(!*S)
+				break;
+
+			continue;
+		}
+
 		INT LineH   = 0;             // running max glyph height (incl. overflow char)
 		INT X       = appFloor(C->CurX);
 		INT FitLen  = 0;             // bytes up to the last usable break point
@@ -191,7 +237,7 @@ static void __fastcall WrappedPrintOverride(UCanvas* C, DWORD, INT Style, INT* X
 		for(;;){
 			BYTE B = S[i];
 
-			if(!B || B == 10)
+			if(!B || LineBreakBytes(S + i))
 				break;
 
 			INT j = i;
@@ -218,13 +264,14 @@ static void __fastcall WrappedPrintOverride(UCanvas* C, DWORD, INT Style, INT* X
 			i = j;
 
 			BYTE Next = S[i];
+			INT NextLineBreakBytes = LineBreakBytes(S + i);
 
 			// Keep ASCII periods (including "...") with the preceding CJK text.
 			bool NextIsNoBreak = Next == '.';
-			if(IsDBCSLead(Next) && IsDBCSTrail(S[i + 1]))
+			if(!NextLineBreakBytes && IsDBCSLead(Next) && IsDBCSTrail(S[i + 1]))
 				NextIsNoBreak = IsNoBreakBeforePunct((Next << 8) | S[i + 1]);
 
-			bool Breakable = (Key > 0xFF && !NextIsNoBreak) || Next == 0 || Next == 10 ||
+			bool Breakable = (Key > 0xFF && !NextIsNoBreak) || Next == 0 || NextLineBreakBytes ||
 			                 (IsDBCSLead(Next) && !NextIsNoBreak) ||
 			                 (Next == 32 && !(S[i + 1] == '!' || S[i + 1] == '?' || S[i + 1] == ':'));
 
@@ -268,8 +315,8 @@ static void __fastcall WrappedPrintOverride(UCanvas* C, DWORD, INT Style, INT* X
 
 		S += FitLen;
 
-		if(*S == 10)
-			++S;
+		INT ForcedBreakBytes = LineBreakBytes(S);
+		S += ForcedBreakBytes;
 
 		while(*S == 32)
 			++S;
