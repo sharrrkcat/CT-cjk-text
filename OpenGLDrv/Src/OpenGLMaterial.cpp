@@ -360,7 +360,7 @@ void FOpenGLRenderInterface::SetTexture(FBaseTexture* Texture,
                                         FLOAT BumpSize,
                                         FLOAT BumpLumaScale,
                                         FLOAT BumpLumaOffset)
-                                        {
+{
 	checkSlow(Texture);
 	checkSlow(TextureIndex < MAX_TEXTURES);
 
@@ -422,13 +422,13 @@ void FOpenGLRenderInterface::SetTexture(FBaseTexture* Texture,
 
 void FOpenGLRenderInterface::SetBitmapTexture(UBitmapMaterial* Bitmap,
                                               INT TextureIndex,
-																							FLOAT UVScale,
+                                              FLOAT UVScale,
                                               ETexClampModeOverride UClamp,
                                               ETexClampModeOverride VClamp,
                                               FLOAT BumpSize,
                                               FLOAT BumpLumaScale,
                                               FLOAT BumpLumaOffset)
-                                              {
+{
 	FBaseTexture* Texture = Bitmap->Get(LockedViewport->CurrentTime, LockedViewport)->GetRenderInterface();
 	SetTexture(Texture, TextureIndex, UVScale, UClamp, VClamp, BumpSize, BumpLumaScale, BumpLumaOffset);
 }
@@ -455,13 +455,13 @@ bool FOpenGLRenderInterface::SetBitmapMaterial(UBitmapMaterial* Material, const 
 
 	if(Material->IsA<UTexture>())
 	{
-		Detail = Cast<UBitmapMaterial>(static_cast<UTexture*>(Material)->Detail);
+		UTexture* Texture = static_cast<UTexture*>(Material);
+
+		Detail = Cast<UBitmapMaterial>(Texture->Detail);
 
 		// If the material is a simple texture, use it to get the blending options
 		if(!ModifyFramebufferBlending)
 		{
-			UTexture* Texture = static_cast<UTexture*>(Material);
-
 			if(Texture->bMasked)
 			{
 				ModifyFramebufferBlending = true;
@@ -481,6 +481,9 @@ bool FOpenGLRenderInterface::SetBitmapMaterial(UBitmapMaterial* Material, const 
 				CurrentState->CullMode = CM_None;
 		}
 	}
+
+	if(ModifierInfo.bModifiesTextureCoordinates)
+		return SetSimpleMaterial(Material, ModifierInfo);
 
 	SetBitmapTexture(Material, 0, 1.0f, ModifierInfo.TexUClamp, ModifierInfo.TexVClamp);
 
@@ -624,30 +627,6 @@ bool FOpenGLRenderInterface::HandleSimpleMaterial(UMaterial* Material, FShaderGe
 
 	if(Material->IsA<UBitmapMaterial>())
 	{
-		if(!ModifyFramebufferBlending && Material->IsA<UTexture>())
-		{
-			// If the material is a simple texture, use it to get the blending options
-			UTexture* Texture = static_cast<UTexture*>(Material);
-
-			if(Texture->bMasked)
-			{
-				ModifyFramebufferBlending = true;
-				CurrentState->UniformRevision += CurrentState->AlphaRef != 0.5f;
-				CurrentState->AlphaRef = 0.5f;
-				SetFramebufferBlending(FB_Overwrite);
-			}
-			else if(Texture->bAlphaTexture)
-			{
-				ModifyFramebufferBlending = true;
-				CurrentState->UniformRevision += CurrentState->AlphaRef != 0.0f;
-				CurrentState->AlphaRef = 0.0f;
-				SetFramebufferBlending(FB_AlphaBlend);
-			}
-
-			if(Texture->bTwoSided)
-				CurrentState->CullMode = CM_None;
-		}
-
 		INT Index = CurrentState->NumTextures++;
 
 		SetBitmapTexture(static_cast<UBitmapMaterial*>(Material), Index, 1.0f, ModifierInfo.TexUClamp, ModifierInfo.TexVClamp);
@@ -849,7 +828,7 @@ bool FOpenGLRenderInterface::HandleShaderMaterial(UShader* Shader, FShaderGenera
 		if(Shader->BumpMapType != BMT_Static_Specular && Shader->BumpMapType != BMT_Specular)
 		{
 			if(Shader->DiffuseEnvMap)
-				DiffuseEnvMap = CastChecked<UBitmapMaterial>(Shader->DiffuseEnvMap);
+				DiffuseEnvMap = Cast<UBitmapMaterial>(Shader->DiffuseEnvMap);
 
 			if(!DiffuseEnvMap && BumpmapIndex != INDEX_NONE)
 				DiffuseEnvMap = GCubemapManager->StaticDiffuse;
@@ -1418,8 +1397,8 @@ bool FOpenGLRenderInterface::SetTerrainMaterial(UTerrainMaterial* TerrainMateria
 
 			CurrentState->NumTextures = 2;
 
-			bool UseLighting = CurrentState->UseStaticLighting || CurrentState->UseDynamicLighting;
-			const FOpenGLShader& Shader = UseLighting ? TerrainShaderAlphaMapStaticLighting : TerrainShaderAlphaMap;
+			const bool           UseLighting = CurrentState->UseStaticLighting || CurrentState->UseDynamicLighting;
+			const FOpenGLShader& Shader      = UseLighting ? TerrainShaderAlphaMapStaticLighting : TerrainShaderAlphaMap;
 
 			RenDev->glProgramUniformMatrix4fv(Shader.Program, 0, 1, GL_TRUE, reinterpret_cast<const GLfloat*>(&Layer.TextureMatrix));
 			SetShader(Shader);
@@ -1450,16 +1429,16 @@ bool FOpenGLRenderInterface::SetTerrainMaterial(UTerrainMaterial* TerrainMateria
 	}
 	else
 	{
+		if(!TerrainMaterial->FirstPass)
+		{
+			SetFramebufferBlending(FB_Translucent);
+			CurrentState->bZWrite = false;
+			CurrentState->FogColor = FPlane(0.0f, 0.0f, 0.0f, 0.0f);
+			CurrentState->OverrideFogColor = true;
+		}
+
 		if(TerrainMaterial->RenderMethod == RM_CombinedWeightMap)
 		{
-			if(!TerrainMaterial->FirstPass)
-			{
-				SetFramebufferBlending(FB_Translucent);
-				CurrentState->bZWrite = false;
-				CurrentState->FogColor = FPlane(0.0f, 0.0f, 0.0f, 0.0f);
-				CurrentState->OverrideFogColor = true;
-			}
-
 			const TArray<FTerrainMaterialLayer>& Layers = TerrainMaterial->Layers;
 			checkSlow(Layers.Num() == 3 || Layers.Num() == 4);
 			checkSlow(Layers[0].Texture->IsA<UBitmapMaterial>());
@@ -1475,40 +1454,23 @@ bool FOpenGLRenderInterface::SetTerrainMaterial(UTerrainMaterial* TerrainMateria
 			TexMatrices[1] = Layers[1].TextureMatrix;
 			TexMatrices[2] = Layers[2].TextureMatrix;
 
-			bool Layer4 = Layers.Num() > 3;
+			FOpenGLShader* Shader;
 
-			if(Layer4)
+			if(Layers.Num() > 3)
 			{
 				SetBitmapTexture(static_cast<UBitmapMaterial*>(Layers[3].Texture), 4, 1.0f, TCO_Wrap, TCO_Wrap);
 				TexMatrices[3] = Layers[3].TextureMatrix;
 				NumTexMatrices = 4;
+				Shader = &TerrainShader4Layers;
 			}
 			else
 			{
 				NumTexMatrices = 3;
+				Shader = &TerrainShader3Layers;
 			}
 
-			// HACK:
-			// WTF??? Terrain code _sometimes_ produces a matrix where the first three rows are exchanged (2,3,1 instead of 1,2,3)
-			// M[0][0] == 0.0f is a reliable way to check for that and correct the error.
-			for(INT i = 0; i < NumTexMatrices; ++i)
-			{
-				if(TexMatrices[i].M[0][0] == 0.0f)
-				{
-					FPlane Row0 = TexMatrices[i].Rows()[0];
-					FPlane Row1 = TexMatrices[i].Rows()[1];
-					FPlane Row2 = TexMatrices[i].Rows()[2];
-
-					TexMatrices[i].Rows()[0] = Row2;
-					TexMatrices[i].Rows()[1] = Row0;
-					TexMatrices[i].Rows()[2] = Row1;
-				}
-			}
-
-			const FOpenGLShader& Shader = Layer4 ? TerrainShader4Layers : TerrainShader3Layers;
-
-			RenDev->glProgramUniformMatrix4fv(Shader.Program, 0, NumTexMatrices, GL_TRUE, reinterpret_cast<const GLfloat*>(TexMatrices));
-			SetShader(Shader);
+			RenDev->glProgramUniformMatrix4fv(Shader->Program, 0, NumTexMatrices, GL_TRUE, reinterpret_cast<const GLfloat*>(TexMatrices));
+			SetShader(*Shader);
 		}
 		else
 		{

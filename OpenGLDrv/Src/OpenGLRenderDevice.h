@@ -26,7 +26,8 @@ public:
 	UBOOL          bBilinearFramebuffer;
 	UBOOL          bSaveShadersToDisk;
 	UBOOL          bAutoReloadShaders;
-	UBOOL          bShowDebugNotifications;
+	UBOOL          bUnloadTextureData;
+	UBOOL          bLogDebugMessages;
 	ETextureFilter TextureFilter;
 	INT            TextureAnisotropy;
 
@@ -155,7 +156,6 @@ private:
 
 	void LoadWGLExtFuncs();
 	void LoadGLFuncs();
-	void LoadGLExtFuncs();
 
 	HMODULE OpenGL32Dll;
 
@@ -167,6 +167,5 @@ public:
 #define GL_FUNC(name, ret, args) ret(OPENGL_CALL*gl ## name)args;
 	GL_BASE_FUNCS
 	GL_FUNCS
-	GL_EXT_FUNCS
 #undef GL_FUNC
 };
